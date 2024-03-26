@@ -4,7 +4,8 @@ The goal is to develop a machine learning model that can predict the length dime
 
 The Training dataset comprises of Product_Title, Description, Bullet_points, Product_ID, Product_Type_ID and Product_Length for 2.2 million products to train and test your submissions.
 
-![download](https://github.com/Dhruv-Sapra/Amazon-ML-challenge/assets/111555972/c4b6b5ac-2eeb-476c-8195-a90be5c9b276)
+![use](https://github.com/DhruvSapra/Amazon-ML-Challenge/assets/143498872/cad7423d-b43c-4064-82e2-d920bf955283)
+
 
 The working approaches given below follow a machine learning approach that involves several steps, including data preprocessing, feature engineering, model selection, and prediction.
 
