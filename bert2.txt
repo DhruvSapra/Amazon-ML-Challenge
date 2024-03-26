@@ -1,1 +1,129 @@
-404: Not Found
+import pandas as pd
+import numpy as np
+import tensorflow as tf
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
+from sklearn.metrics import mean_absolute_percentage_error
+from transformers import BertTokenizer, TFBertModel
+from tensorflow.keras.layers import Input, Dense
+from tensorflow.keras.models import Model
+from tensorflow.keras.models import load_model
+from tensorflow.keras.optimizers import Adam
+
+
+
+
+# detect and init the TPU
+tpu = tf.distribute.cluster_resolver.TPUClusterResolver.connect()
+
+# instantiate a distribution strategy
+tpu_strategy = tf.distribute.experimental.TPUStrategy(tpu)
+
+
+# Load the cleaned train dataset
+df = pd.read_csv("/kaggle/input/cleaned-traincsv/cleaned_train.csv",nrows=1000000)
+
+
+# Split the dataset into train, validation, and test sets
+train_df, test_df = train_test_split(df[['PRODUCT_TYPE_ID', 'TEXT', 'PRODUCT_LENGTH']], test_size=0.2, random_state=42)
+train_df, val_df = train_test_split(train_df, test_size=0.1, random_state=42)
+
+
+# Remove rows with missing values
+train_df.dropna(inplace=True)
+val_df.dropna(inplace=True)
+test_df.dropna(inplace=True)
+
+print(train_df.shape[0],val_df.shape[0],test_df.shape[0])
+
+
+with tpu_strategy.scope():
+    # Initialize the BERT tokenizer and model
+    tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+    bert_model = TFBertModel.from_pretrained('bert-base-uncased')
+
+
+    # Encode the product type id using a label encoder
+    label_encoder = LabelEncoder()
+    label_encoder.fit(train_df['PRODUCT_TYPE_ID'])
+    unknown_value = len(label_encoder.classes_)
+
+    train_df['PRODUCT_TYPE_ID'] = label_encoder.transform(train_df['PRODUCT_TYPE_ID'])
+
+    test_df['PRODUCT_TYPE_ID'] = test_df['PRODUCT_TYPE_ID'].apply(lambda x: label_encoder.transform([x])[0] if x in label_encoder.classes_ else unknown_value)
+    test_df['PRODUCT_TYPE_ID'] = test_df['PRODUCT_TYPE_ID'].apply(lambda x: x if x in range(len(label_encoder.classes_)) else unknown_value)
+
+    val_df['PRODUCT_TYPE_ID'] = val_df['PRODUCT_TYPE_ID'].apply(lambda x: label_encoder.transform([x])[0] + 1 if x in label_encoder.classes_ else 0)
+    val_df['PRODUCT_TYPE_ID'] = val_df['PRODUCT_TYPE_ID'].apply(lambda x: x if x in range(len(label_encoder.classes_)) else unknown_value)
+    # Tokenize the text data and convert it into embeddings
+    def tokenize_and_encode(df):
+        input_ids = []
+        attention_masks = []
+        product_type_ids = []
+
+        for text, product_type_id in zip(df['TEXT'].values, df['PRODUCT_TYPE_ID'].values):
+            encoded = tokenizer.encode_plus(text, max_length=512, truncation=True, padding='max_length', add_special_tokens=True, return_attention_mask=True, return_token_type_ids=True)
+            input_ids.append(encoded['input_ids'])
+            attention_masks.append(encoded['attention_mask'])
+            product_type_ids.append([product_type_id]*512)
+
+        return np.array(input_ids), np.array(attention_masks), np.array(product_type_ids)
+
+    # Define the machine learning model using the BERT embeddings
+    def build_model():
+        input_ids = Input(shape=(512,), dtype=tf.int32, name='input_ids')
+        attention_masks = Input(shape=(512,), dtype=tf.int32, name='attention_masks')
+        product_type_ids = Input(shape=(512,), dtype=tf.int32, name='product_type_ids')
+
+        bert_output = bert_model({'input_ids': input_ids, 'attention_mask': attention_masks, 'token_type_ids': product_type_ids})[1]
+        dense_output = Dense(128, activation='relu')(bert_output)
+        output = Dense(1, activation='linear')(dense_output)
+
+        model = Model(inputs=[input_ids, attention_masks, product_type_ids], outputs=output)
+        optimizer = Adam(learning_rate=2e-5, amsgrad=False)
+        model.compile(loss='mse', optimizer=optimizer, metrics=['mse'])
+
+        return model
+
+    # Train the machine learning model
+    input_ids_train, attention_masks_train , product_type_ids_train = tokenize_and_encode(train_df)
+    y_train = train_df['PRODUCT_LENGTH'].values
+
+    input_ids_val, attention_masks_val , product_type_ids_val = tokenize_and_encode(val_df)
+    y_val = val_df['PRODUCT_LENGTH'].values
+
+    # instantiating the model in the strategy scope creates the model on the TPU
+
+    model = build_model()
+
+
+history = model.fit([input_ids_train, attention_masks_train, product_type_ids_train ], y_train, validation_data=([input_ids_val, attention_masks_val,  product_type_ids_val], y_val), batch_size=32, epochs=10)
+
+
+
+
+# Save the trained model
+model.save('bert2_1M_b32_e10.h5')
+
+# # Load the saved model
+# model = load_model('my_model.h5')
+
+
+
+
+# Evaluate the machine learning model on the test set
+input_ids_test, attention_masks_test , product_type_ids_test = tokenize_and_encode(test_df)
+y_test = test_df['PRODUCT_LENGTH'].values
+
+# Use the model to make predictions on the test set
+predictions = model.predict([input_ids_test, attention_masks_test, product_type_ids_test])
+
+# Evaluate the model's performance using mean squared error
+_, mse = model.evaluate([input_ids_test, attention_masks_test, product_type_ids_test], y_test)
+print("Test MSE:", mse)
+
+# Calculate accuracy score using mean absolute percentage error
+score = max(0, 100 * (1 - mean_absolute_percentage_error(y_test, predictions)))
+print(f"Accuracy score: {score:.2f}%")
+
+
